@@ -1,5 +1,6 @@
 use std::env;
 use std::fs;
+use std::path::Path;
 use std::process;
 
 const DEFAULT_MAX_LINES: usize = 80;
@@ -106,7 +107,11 @@ fn parse_target(target: &str) -> Result<(&str, usize), String> {
 }
 
 fn find_span(file: &str, lines: &[&str], line: usize) -> Span {
-    if file.ends_with(".md") {
+    if Path::new(file)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+    {
         if let Some(span) = markdown_fence_span(lines, line) {
             return span;
         }
@@ -137,8 +142,8 @@ fn markdown_fence_span(lines: &[&str], line: usize) -> Option<Span> {
 
     let start = start?;
     let mut end = None;
-    for index in line..lines.len() {
-        if lines[index].trim_start().starts_with("```") {
+    for (index, line_text) in lines.iter().enumerate().skip(line) {
+        if line_text.trim_start().starts_with("```") {
             end = Some(index + 1);
             break;
         }
