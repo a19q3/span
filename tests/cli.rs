@@ -171,6 +171,37 @@ fn symbol_finds_rust_structs_enums_and_traits() {
 }
 
 #[test]
+fn symbol_finds_rust_impl_blocks_by_implemented_type() {
+    let dir = temp_dir("span-rust-impls");
+    let file = dir.join("sample.rs");
+    fs::write(
+        &file,
+        "struct Store<T> {\n    value: T,\n}\n\ntrait Runnable {}\n\nimpl<T: Clone> Store<T> {\n    fn get(&self) {}\n}\n\nimpl Runnable for crate::workers::Worker {\n    fn run(&self) {}\n}\n",
+    )
+    .expect("write sample");
+
+    for symbol in ["Store", "Worker"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_span"))
+            .args([
+                "--kind",
+                "impl",
+                "--symbol",
+                symbol,
+                dir.to_str().expect("utf8 path"),
+            ])
+            .output()
+            .expect("run span");
+
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("kind: impl"), "{stdout}");
+        assert!(stdout.contains(&format!("symbol: {symbol}")), "{stdout}");
+    }
+
+    fs::remove_dir_all(dir).expect("remove temp dir");
+}
+
+#[test]
 fn kind_filter_accepts_matching_span_kind() {
     let dir = temp_dir("span-kind");
     let file = dir.join("sample.rs");

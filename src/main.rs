@@ -455,15 +455,55 @@ fn first_symbol_token(text: &str) -> String {
 }
 
 fn impl_symbol_name(text: &str) -> String {
-    let rest = text.strip_prefix("impl").unwrap_or(text).trim_start();
+    let mut rest = text.strip_prefix("impl").unwrap_or(text).trim_start();
 
-    if let Some(generic_rest) = rest.strip_prefix('<') {
-        if let Some(end) = generic_rest.find('>') {
-            return first_symbol_token(&generic_rest[end + 1..]);
+    if rest.starts_with('<') {
+        if let Some(end) = matching_angle_end(rest) {
+            rest = rest[end + 1..].trim_start();
         }
     }
 
-    first_symbol_token(rest)
+    if let Some((_, implemented_type)) = rest.rsplit_once(" for ") {
+        return type_symbol_token(implemented_type);
+    }
+
+    type_symbol_token(rest)
+}
+
+fn matching_angle_end(text: &str) -> Option<usize> {
+    let mut depth = 0_i32;
+
+    for (index, character) in text.char_indices() {
+        match character {
+            '<' => depth += 1,
+            '>' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn type_symbol_token(text: &str) -> String {
+    let token = text
+        .trim_start()
+        .split(|character: char| {
+            character == '<'
+                || character == '{'
+                || character == ';'
+                || character == '('
+                || character.is_whitespace()
+        })
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or("<unknown>");
+
+    token.rsplit("::").next().unwrap_or(token).to_string()
 }
 
 fn brace_span_end(lines: &[&str], start: usize) -> Option<usize> {
