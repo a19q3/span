@@ -1,6 +1,6 @@
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process;
 
 const DEFAULT_MAX_LINES: usize = 80;
@@ -8,9 +8,15 @@ const CONTEXT_RADIUS: usize = 20;
 
 #[derive(Debug)]
 struct Args {
-    target: String,
+    target: Target,
     max_lines: usize,
     json: bool,
+}
+
+#[derive(Debug)]
+enum Target {
+    Position(String),
+    Contains { pattern: String, root: PathBuf },
 }
 
 #[derive(Debug)]
@@ -27,6 +33,7 @@ fn main() {
         Err(message) => {
             eprintln!("span: {message}");
             eprintln!("usage: span [--max-lines N] [--json] FILE:LINE");
+            eprintln!("       span [--max-lines N] [--json] --contains PATTERN [PATH]");
             process::exit(2);
         }
     };
@@ -46,7 +53,9 @@ where
 {
     let mut max_lines = DEFAULT_MAX_LINES;
     let mut json = false;
-    let mut target = None;
+    let mut contains = None;
+    let mut position = None;
+    let mut root = None;
     let mut iter = input.into_iter();
 
     while let Some(arg) = iter.next() {
@@ -58,39 +67,62 @@ where
                     .parse()
                     .map_err(|_| "--max-lines requires a positive integer".to_string())?;
             }
+            "--contains" => {
+                contains = Some(
+                    iter.next()
+                        .ok_or_else(|| "--contains requires a pattern".to_string())?,
+                );
+            }
             "--json" => json = true,
             "-h" | "--help" => {
                 println!("usage: span [--max-lines N] [--json] FILE:LINE");
+                println!("       span [--max-lines N] [--json] --contains PATTERN [PATH]");
                 process::exit(0);
             }
-            _ if target.is_none() => target = Some(arg),
+            _ if contains.is_some() && root.is_none() => root = Some(PathBuf::from(arg)),
+            _ if contains.is_none() && position.is_none() => position = Some(arg),
             _ => return Err(format!("unexpected argument: {arg}")),
         }
     }
 
+    let target = if let Some(pattern) = contains {
+        Target::Contains {
+            pattern,
+            root: root.unwrap_or_else(|| PathBuf::from(".")),
+        }
+    } else {
+        Target::Position(position.ok_or_else(|| "missing FILE:LINE target".to_string())?)
+    };
+
     Ok(Args {
-        target: target.ok_or_else(|| "missing FILE:LINE target".to_string())?,
+        target,
         max_lines,
         json,
     })
 }
 
 fn run(args: &Args) -> Result<(), String> {
-    let (file, line) = parse_target(&args.target)?;
-    let text = fs::read_to_string(file).map_err(|error| format!("{file}: {error}"))?;
+    let (file, line): (String, usize) = match &args.target {
+        Target::Position(target) => {
+            let (file, line) = parse_target(target)?;
+            (file.to_string(), line)
+        }
+        Target::Contains { pattern, root } => find_contains(root, pattern)?,
+    };
+    let text = fs::read_to_string(&file).map_err(|error| format!("{file}: {error}"))?;
     let lines: Vec<&str> = text.lines().collect();
 
     if line == 0 || line > lines.len() {
         return Err(format!("{file}: line {line} is outside 1..{}", lines.len()));
     }
 
-    let span = find_span(file, &lines, line);
+    let span = find_span(&file, &lines, line);
     let span = cap_span(span, args.max_lines, lines.len());
 
     if args.json {
-        print_json(file, line, &lines, &span);
+        print_json(&file, line, &lines, &span);
     } else {
-        print_human(file, line, &lines, &span);
+        print_human(&file, line, &lines, &span);
     }
 
     Ok(())
@@ -104,6 +136,55 @@ fn parse_target(target: &str) -> Result<(&str, usize), String> {
         .parse()
         .map_err(|_| "line must be a positive integer".to_string())?;
     Ok((file, line))
+}
+
+fn find_contains(root: &Path, pattern: &str) -> Result<(String, usize), String> {
+    let mut matches = Vec::new();
+    collect_matches(root, pattern, &mut matches)?;
+    matches
+        .into_iter()
+        .next()
+        .ok_or_else(|| format!("pattern not found: {pattern}"))
+}
+
+fn collect_matches(
+    path: &Path,
+    pattern: &str,
+    matches: &mut Vec<(String, usize)>,
+) -> Result<(), String> {
+    if path.is_dir() {
+        let entries = fs::read_dir(path).map_err(|error| format!("{}: {error}", path.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| error.to_string())?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if matches!(name.as_ref(), ".git" | "target" | "node_modules") {
+                continue;
+            }
+            collect_matches(&entry.path(), pattern, matches)?;
+            if !matches.is_empty() {
+                break;
+            }
+        }
+        return Ok(());
+    }
+
+    if !path.is_file() {
+        return Ok(());
+    }
+
+    let Ok(text) = fs::read_to_string(path) else {
+        return Ok(());
+    };
+
+    for (index, line) in text.lines().enumerate() {
+        if line.contains(pattern) {
+            matches.push((path.to_string_lossy().to_string(), index + 1));
+            break;
+        }
+    }
+
+    Ok(())
 }
 
 fn find_span(file: &str, lines: &[&str], line: usize) -> Span {
