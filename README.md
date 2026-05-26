@@ -45,11 +45,18 @@ Fields include:
 - `file`
 - `line`
 - `range`
+- `semantic_range`
+- `visible_range`
 - `kind`
 - `symbol`
 - `text`
 
 See [docs/json.md](docs/json.md).
+
+`range` is the bounded visible range for backwards compatibility. `semantic_range`
+is the best-effort containing unit before `--max-lines` is applied.
+`visible_range` is the exact range printed in `text`. When a span is truncated,
+`span` keeps the requested line inside the visible range.
 
 ## When To Use
 
@@ -74,6 +81,10 @@ See [docs/json.md](docs/json.md).
 - `auto` silently falls back to the heuristic extractor when external backends are unavailable or unsuitable.
 - Explicit external backends fail clearly when no concrete symbol can be inferred.
 - `backend doctor` probes `ast-outline` and `ast-bro` via `--help`; it does not install tools.
-- Complex Rust macros, nested impls, and unusual formatting may produce approximate spans.
-- Recursive `--contains` and `--symbol` searches are deterministic by path order.
+- Complex Rust macros, byte/raw byte string edge cases, and unusual formatting may produce approximate spans.
+- Rust attributes and Python decorators are attached to the following item when they are contiguous.
+- Markdown fenced blocks support backtick and tilde fences, including unclosed fences to EOF.
+- Recursive `--contains` and `--symbol` searches are deterministic by path order and skip symlinked directories.
+- `--symbol` returns the first deterministic match; use a narrower path for common names such as `run`, `new`, or `main`.
+- External backends run with stdin closed, a short timeout, and capped stdout/stderr before `--max-lines` is applied.
 - `--kind` filters candidates before returning a span.

@@ -4,7 +4,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{PermissionsExt, symlink};
 
 fn temp_dir(name: &str) -> PathBuf {
     let stamp = SystemTime::now()
@@ -181,6 +181,54 @@ fn symbol_finds_rust_structs_enums_and_traits() {
 }
 
 #[test]
+fn rust_attribute_line_maps_to_decorated_item() {
+    let dir = temp_dir("span-rust-attribute");
+    let file = dir.join("sample.rs");
+    fs::write(
+        &file,
+        "#[derive(Debug)]\npub(in crate::model) struct Foo {\n    value: u64,\n}\n",
+    )
+    .expect("write sample");
+
+    let target = format!("{}:1", file.display());
+    let output = Command::new(env!("CARGO_BIN_EXE_span"))
+        .arg(target)
+        .output()
+        .expect("run span");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("range: 1..4"), "{stdout}");
+    assert!(stdout.contains("kind: struct"), "{stdout}");
+    assert!(stdout.contains("symbol: Foo"), "{stdout}");
+    assert!(stdout.contains(">    1 | #[derive(Debug)]"), "{stdout}");
+
+    fs::remove_dir_all(dir).expect("remove temp dir");
+}
+
+#[test]
+fn python_decorator_line_maps_to_decorated_function() {
+    let dir = temp_dir("span-python-decorator");
+    let file = dir.join("sample.py");
+    fs::write(&file, "@property\ndef value(self):\n    return 1\n").expect("write sample");
+
+    let target = format!("{}:1", file.display());
+    let output = Command::new(env!("CARGO_BIN_EXE_span"))
+        .arg(target)
+        .output()
+        .expect("run span");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("range: 1..3"), "{stdout}");
+    assert!(stdout.contains("kind: function"), "{stdout}");
+    assert!(stdout.contains("symbol: value"), "{stdout}");
+    assert!(stdout.contains(">    1 | @property"), "{stdout}");
+
+    fs::remove_dir_all(dir).expect("remove temp dir");
+}
+
+#[test]
 fn symbol_finds_rust_impl_blocks_by_implemented_type() {
     let dir = temp_dir("span-rust-impls");
     let file = dir.join("sample.rs");
@@ -291,6 +339,28 @@ fn markdown_fence_contains_inner_line() {
 }
 
 #[test]
+fn markdown_tilde_and_unclosed_fences_are_spans() {
+    let dir = temp_dir("span-markdown-tilde");
+    let file = dir.join("sample.md");
+    fs::write(&file, "# Notes\n\n~~~rust\nfn selected() {}\n").expect("write markdown sample");
+
+    let target = format!("{}:4", file.display());
+    let output = Command::new(env!("CARGO_BIN_EXE_span"))
+        .arg(target)
+        .output()
+        .expect("run span");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("range: 3..4"), "{stdout}");
+    assert!(stdout.contains("kind: markdown-fence"), "{stdout}");
+    assert!(stdout.contains("symbol: ~~~"), "{stdout}");
+    assert!(stdout.contains(">    4 | fn selected() {}"), "{stdout}");
+
+    fs::remove_dir_all(dir).expect("remove temp dir");
+}
+
+#[test]
 fn markdown_text_between_fences_is_not_reported_as_fence() {
     let dir = temp_dir("span-markdown-between-fences");
     let file = dir.join("sample.md");
@@ -359,6 +429,103 @@ fn max_lines_rejects_zero() {
         stderr.contains("--max-lines requires a positive integer"),
         "{stderr}"
     );
+}
+
+#[test]
+fn truncation_keeps_target_line_visible_and_reports_ranges() {
+    let dir = temp_dir("span-truncation-target");
+    let file = dir.join("sample.rs");
+    let mut text = String::from("fn big() {\n");
+    for number in 1..=100 {
+        text.push_str(&format!("    println!(\"line {number}\");\n"));
+    }
+    text.push_str("}\n");
+    fs::write(&file, text).expect("write sample");
+
+    let target = format!("{}:51", file.display());
+    let output = Command::new(env!("CARGO_BIN_EXE_span"))
+        .args(["--max-lines", "5", &target])
+        .output()
+        .expect("run span");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("range: 1..102"), "{stdout}");
+    assert!(stdout.contains("visible range: 49..53"), "{stdout}");
+    assert!(stdout.contains("truncated: yes"), "{stdout}");
+    assert!(
+        stdout.contains(">   51 |     println!(\"line 50\");"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("truncated before visible range"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("truncated after visible range"), "{stdout}");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_span"))
+        .args(["--json", "--max-lines", "5", &target])
+        .output()
+        .expect("run span json");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("\"truncated\":true"), "{stdout}");
+    assert!(stdout.contains("\"range\":[49,53]"), "{stdout}");
+    assert!(stdout.contains("\"semantic_range\":[1,102]"), "{stdout}");
+    assert!(stdout.contains("\"visible_range\":[49,53]"), "{stdout}");
+    assert!(stdout.contains("line 50"), "{stdout}");
+    assert!(!stdout.contains("line 1"), "{stdout}");
+
+    fs::remove_dir_all(dir).expect("remove temp dir");
+}
+
+#[test]
+fn braces_inside_strings_and_comments_do_not_end_rust_span() {
+    let dir = temp_dir("span-rust-braces");
+    let file = dir.join("sample.rs");
+    fs::write(
+        &file,
+        "fn alpha() {\n    let text = \"}\";\n    // {\n}\n\nfn beta() {}\n",
+    )
+    .expect("write sample");
+
+    let target = format!("{}:2", file.display());
+    let output = Command::new(env!("CARGO_BIN_EXE_span"))
+        .arg(target)
+        .output()
+        .expect("run span");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("range: 1..4"), "{stdout}");
+    assert!(!stdout.contains("fn beta"), "{stdout}");
+
+    fs::remove_dir_all(dir).expect("remove temp dir");
+}
+
+#[cfg(unix)]
+#[test]
+fn recursive_search_skips_symlink_directory_cycles() {
+    let dir = temp_dir("span-symlink-cycle");
+    let root = dir.join("root");
+    fs::create_dir_all(root.join("src")).expect("create src");
+    fs::write(
+        root.join("src/lib.rs"),
+        "fn alpha() {\n    println!(\"needle\");\n}\n",
+    )
+    .expect("write sample");
+    symlink("..", root.join("src/loop")).expect("create symlink loop");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_span"))
+        .args(["--contains", "needle", root.to_str().expect("utf8 root")])
+        .output()
+        .expect("run span");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("symbol: alpha"), "{stdout}");
+
+    fs::remove_dir_all(dir).expect("remove temp dir");
 }
 
 #[cfg(unix)]
