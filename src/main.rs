@@ -1,5 +1,7 @@
 use std::env;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command};
 
@@ -339,11 +341,24 @@ fn find_executable_in_path(binary: &str) -> Option<PathBuf> {
     let path = env::var_os("PATH").unwrap_or_default();
     for dir in env::split_paths(&path) {
         let candidate = dir.join(binary);
-        if candidate.is_file() {
+        if is_executable_file(&candidate) {
             return Some(candidate);
         }
     }
     None
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
+        && fs::metadata(path)
+            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
 }
 
 fn run_cli(cli: &Cli) -> Result<(), String> {

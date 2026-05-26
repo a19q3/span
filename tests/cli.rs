@@ -404,6 +404,36 @@ fn backend_doctor_json_reports_available_and_missing_backends() {
     fs::remove_dir_all(dir).expect("remove temp dir");
 }
 
+#[cfg(unix)]
+#[test]
+fn backend_doctor_does_not_report_non_executable_files_as_available() {
+    let dir = temp_dir("span-backend-doctor-non-exec");
+    let bin_dir = dir.join("bin");
+    fs::create_dir_all(&bin_dir).expect("create bin dir");
+    let fake_backend = bin_dir.join("ast-outline");
+    fs::write(&fake_backend, "#!/bin/sh\nprintf 'fake help\\n'\n").expect("write fake backend");
+    let mut permissions = fs::metadata(&fake_backend)
+        .expect("fake backend metadata")
+        .permissions();
+    permissions.set_mode(0o644);
+    fs::set_permissions(&fake_backend, permissions).expect("chmod fake backend");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_span"))
+        .args(["backend", "doctor", "--json"])
+        .env("PATH", bin_dir.to_str().expect("utf8 bin dir"))
+        .output()
+        .expect("run span");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("\"name\":\"ast-outline\",\"binary\":\"ast-outline\",\"available\":false"),
+        "{stdout}"
+    );
+
+    fs::remove_dir_all(dir).expect("remove temp dir");
+}
+
 #[test]
 fn explicit_missing_backend_returns_clear_error() {
     let dir = temp_dir("span-backend-missing");
