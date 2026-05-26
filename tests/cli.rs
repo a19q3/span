@@ -57,6 +57,13 @@ fn json_output_contains_target_text() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("\"tool\":\"span\""), "{stdout}");
+    assert!(stdout.contains("\"backend\":\"heuristic\""), "{stdout}");
+    assert!(
+        stdout.contains("\"backend_reason\":\"heuristic backend selected explicitly\""),
+        "{stdout}"
+    );
+    assert!(stdout.contains("\"fallback_used\":false"), "{stdout}");
+    assert!(stdout.contains("\"truncated\":false"), "{stdout}");
     assert!(stdout.contains("\"symbol\":\"alpha\""), "{stdout}");
     assert!(stdout.contains("return 42"), "{stdout}");
 
@@ -354,6 +361,49 @@ fn max_lines_rejects_zero() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn backend_doctor_json_reports_available_and_missing_backends() {
+    let dir = temp_dir("span-backend-doctor");
+    let bin_dir = dir.join("bin");
+    fs::create_dir_all(&bin_dir).expect("create bin dir");
+    let fake_backend = bin_dir.join("ast-outline");
+    fs::write(
+        &fake_backend,
+        "#!/bin/sh\nif [ \"$1\" = \"--help\" ]; then printf 'fake help\\n'; exit 0; fi\nexit 0\n",
+    )
+    .expect("write fake backend");
+    let mut permissions = fs::metadata(&fake_backend)
+        .expect("fake backend metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&fake_backend, permissions).expect("chmod fake backend");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_span"))
+        .args(["backend", "doctor", "--json"])
+        .env("PATH", bin_dir.to_str().expect("utf8 bin dir"))
+        .output()
+        .expect("run span");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("\"default_backend\":\"heuristic\""),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("\"auto_order\":[\"ast-outline\",\"ast-bro\",\"heuristic\"]"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("\"name\":\"ast-outline\""), "{stdout}");
+    assert!(stdout.contains("\"available\":true"), "{stdout}");
+    assert!(stdout.contains("\"help_status\":\"ok\""), "{stdout}");
+    assert!(stdout.contains("\"name\":\"ast-bro\""), "{stdout}");
+    assert!(stdout.contains("\"available\":false"), "{stdout}");
+
+    fs::remove_dir_all(dir).expect("remove temp dir");
+}
+
 #[test]
 fn explicit_missing_backend_returns_clear_error() {
     let dir = temp_dir("span-backend-missing");
@@ -395,6 +445,50 @@ fn explicit_backend_requires_concrete_symbol() {
         stderr.contains("backend ast-outline requires a concrete symbol"),
         "{stderr}"
     );
+
+    fs::remove_dir_all(dir).expect("remove temp dir");
+}
+
+#[cfg(unix)]
+#[test]
+fn auto_explain_reports_selected_external_backend() {
+    let dir = temp_dir("span-backend-explain");
+    let bin_dir = dir.join("bin");
+    fs::create_dir_all(&bin_dir).expect("create bin dir");
+    let fake_backend = bin_dir.join("ast-outline");
+    fs::write(
+        &fake_backend,
+        "#!/bin/sh\nif [ \"$1\" = \"--help\" ]; then printf 'fake help\\n'; exit 0; fi\nprintf 'external body for %s\\n' \"$3\"\n",
+    )
+    .expect("write fake backend");
+    let mut permissions = fs::metadata(&fake_backend)
+        .expect("fake backend metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&fake_backend, permissions).expect("chmod fake backend");
+
+    let file = dir.join("sample.rs");
+    fs::write(&file, "fn alpha() {\n    println!(\"selected\");\n}\n").expect("write sample");
+
+    let target = format!("{}:2", file.display());
+    let output = Command::new(env!("CARGO_BIN_EXE_span"))
+        .args(["--backend", "auto", "--explain", &target])
+        .env("PATH", bin_dir.to_str().expect("utf8 bin dir"))
+        .output()
+        .expect("run span");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("backend: ast-outline"), "{stdout}");
+    assert!(stdout.contains("external body for alpha"), "{stdout}");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("backend: ast-outline"), "{stderr}");
+    assert!(
+        stderr.contains("backend reason: auto selected ast-outline"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("fallback used: no"), "{stderr}");
 
     fs::remove_dir_all(dir).expect("remove temp dir");
 }

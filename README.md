@@ -17,6 +17,9 @@ span --kind function --contains "panic!" src/
 span --max-lines 40 --json src/main.rs:42
 span --backend auto src/main.rs:42
 span --backend ast-outline --symbol verify_proof_plan crates/
+span --explain --backend auto src/main.rs:42
+span backend doctor
+span backend doctor --json
 ```
 
 Backend options:
@@ -26,6 +29,8 @@ Backend options:
 - `ast-outline`: delegate known symbol bodies to `ast-outline show FILE SYMBOL`.
 - `ast-bro`: delegate known symbol bodies to `ast-bro show FILE SYMBOL`.
 
+`--explain` writes backend selection details to stderr. `backend doctor` reports external backend availability without changing the default backend.
+
 ## JSON Output Contract
 
 `span --json TARGET` writes a JSON span to stdout and exits non-zero when no span can be found.
@@ -34,6 +39,9 @@ Fields include:
 
 - `tool`
 - `backend`
+- `backend_reason`
+- `fallback_used`
+- `truncated`
 - `file`
 - `line`
 - `range`
@@ -65,6 +73,7 @@ See [docs/json.md](docs/json.md).
 - External backends are only used when `span` has a concrete symbol to delegate.
 - `auto` silently falls back to the heuristic extractor when external backends are unavailable or unsuitable.
 - Explicit external backends fail clearly when no concrete symbol can be inferred.
+- `backend doctor` probes `ast-outline` and `ast-bro` via `--help`; it does not install tools.
 - Complex Rust macros, nested impls, and unusual formatting may produce approximate spans.
 - Recursive `--contains` and `--symbol` searches are deterministic by path order.
 - `--kind` filters candidates before returning a span.

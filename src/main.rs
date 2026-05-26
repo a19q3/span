@@ -12,7 +12,14 @@ struct Args {
     max_lines: usize,
     kind: Option<String>,
     backend: Backend,
+    explain: bool,
     json: bool,
+}
+
+#[derive(Debug)]
+enum Cli {
+    Span(Args),
+    BackendDoctor { json: bool },
 }
 
 #[derive(Debug)]
@@ -42,33 +49,81 @@ struct Span {
 struct ExternalSpan {
     backend: &'static str,
     text: String,
+    truncated: bool,
+}
+
+#[derive(Debug)]
+struct BackendSelection {
+    backend: &'static str,
+    reason: String,
+    fallback_used: bool,
+    external: Option<ExternalSpan>,
+    truncated: bool,
+}
+
+#[derive(Debug)]
+struct BackendProbe {
+    name: &'static str,
+    binary: &'static str,
+    available: bool,
+    path: Option<String>,
+    help_ok: bool,
+    help_status: String,
 }
 
 fn main() {
-    let args = match parse_args(env::args().skip(1)) {
-        Ok(args) => args,
+    let cli = match parse_cli(env::args().skip(1).collect()) {
+        Ok(cli) => cli,
         Err(message) => {
             eprintln!("span: {message}");
-            eprintln!(
-                "usage: span [--max-lines N] [--kind KIND] [--backend NAME] [--json] FILE:LINE"
-            );
-            eprintln!(
-                "       span [--max-lines N] [--kind KIND] [--backend NAME] [--json] --contains PATTERN [PATH]"
-            );
-            eprintln!(
-                "       span [--max-lines N] [--kind KIND] [--backend NAME] [--json] --symbol NAME [PATH]"
-            );
+            print_usage_stderr();
             process::exit(2);
         }
     };
 
-    match run(&args) {
+    match run_cli(&cli) {
         Ok(()) => {}
         Err(error) => {
             eprintln!("span: {error}");
             process::exit(1);
         }
     }
+}
+
+fn parse_cli(input: Vec<String>) -> Result<Cli, String> {
+    if input.first().map(String::as_str) == Some("backend") {
+        parse_backend_command(input.into_iter().skip(1))
+    } else {
+        parse_args(input).map(Cli::Span)
+    }
+}
+
+fn parse_backend_command<I>(input: I) -> Result<Cli, String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut iter = input.into_iter();
+    let Some(command) = iter.next() else {
+        return Err("backend requires a subcommand".to_string());
+    };
+
+    if command != "doctor" {
+        return Err(format!("unknown backend subcommand: {command}"));
+    }
+
+    let mut json = false;
+    for arg in iter {
+        match arg.as_str() {
+            "--json" => json = true,
+            "-h" | "--help" => {
+                println!("usage: span backend doctor [--json]");
+                process::exit(0);
+            }
+            _ => return Err(format!("unexpected argument: {arg}")),
+        }
+    }
+
+    Ok(Cli::BackendDoctor { json })
 }
 
 fn parse_args<I>(input: I) -> Result<Args, String>
@@ -78,6 +133,7 @@ where
     let mut max_lines = DEFAULT_MAX_LINES;
     let mut kind = None;
     let mut backend = Backend::Heuristic;
+    let mut explain = false;
     let mut json = false;
     let mut contains = None;
     let mut symbol = None;
@@ -123,17 +179,9 @@ where
                 );
             }
             "--json" => json = true,
+            "--explain" => explain = true,
             "-h" | "--help" => {
-                println!(
-                    "usage: span [--max-lines N] [--kind KIND] [--backend NAME] [--json] FILE:LINE"
-                );
-                println!(
-                    "       span [--max-lines N] [--kind KIND] [--backend NAME] [--json] --contains PATTERN [PATH]"
-                );
-                println!(
-                    "       span [--max-lines N] [--kind KIND] [--backend NAME] [--json] --symbol NAME [PATH]"
-                );
-                println!("       backend: heuristic | auto | ast-outline | ast-bro");
+                print_usage_stdout();
                 process::exit(0);
             }
             _ if (contains.is_some() || symbol.is_some()) && root.is_none() => {
@@ -169,8 +217,36 @@ where
         max_lines,
         kind,
         backend,
+        explain,
         json,
     })
+}
+
+fn print_usage_stdout() {
+    println!(
+        "usage: span [--max-lines N] [--kind KIND] [--backend NAME] [--explain] [--json] FILE:LINE"
+    );
+    println!(
+        "       span [--max-lines N] [--kind KIND] [--backend NAME] [--explain] [--json] --contains PATTERN [PATH]"
+    );
+    println!(
+        "       span [--max-lines N] [--kind KIND] [--backend NAME] [--explain] [--json] --symbol NAME [PATH]"
+    );
+    println!("       span backend doctor [--json]");
+    println!("       backend: heuristic | auto | ast-outline | ast-bro");
+}
+
+fn print_usage_stderr() {
+    eprintln!(
+        "usage: span [--max-lines N] [--kind KIND] [--backend NAME] [--explain] [--json] FILE:LINE"
+    );
+    eprintln!(
+        "       span [--max-lines N] [--kind KIND] [--backend NAME] [--explain] [--json] --contains PATTERN [PATH]"
+    );
+    eprintln!(
+        "       span [--max-lines N] [--kind KIND] [--backend NAME] [--explain] [--json] --symbol NAME [PATH]"
+    );
+    eprintln!("       span backend doctor [--json]");
 }
 
 fn parse_backend(value: &str) -> Result<Backend, String> {
@@ -182,6 +258,101 @@ fn parse_backend(value: &str) -> Result<Backend, String> {
         _ => Err(format!(
             "unknown backend {value}; expected heuristic, auto, ast-outline, or ast-bro"
         )),
+    }
+}
+
+fn print_backend_doctor(json: bool) {
+    let probes = backend_probes();
+    if json {
+        let backends = probes
+            .iter()
+            .map(|probe| {
+                format!(
+                    "{{\"name\":\"{}\",\"binary\":\"{}\",\"available\":{},\"path\":{},\"help_ok\":{},\"help_status\":\"{}\"}}",
+                    probe.name,
+                    probe.binary,
+                    probe.available,
+                    json_optional_string(probe.path.as_deref()),
+                    probe.help_ok,
+                    json_escape(&probe.help_status)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        println!(
+            "{{\"tool\":\"span\",\"command\":\"backend doctor\",\"default_backend\":\"heuristic\",\"auto_order\":[\"ast-outline\",\"ast-bro\",\"heuristic\"],\"backends\":[{backends}]}}"
+        );
+        return;
+    }
+
+    println!("default backend: heuristic");
+    println!("auto order: ast-outline -> ast-bro -> heuristic");
+    for probe in probes {
+        println!(
+            "{}: {}",
+            probe.name,
+            if probe.available { "found" } else { "missing" }
+        );
+        println!("  path: {}", probe.path.as_deref().unwrap_or("<not found>"));
+        println!("  help: {}", probe.help_status);
+    }
+}
+
+fn backend_probes() -> Vec<BackendProbe> {
+    [Backend::AstOutline, Backend::AstBro]
+        .into_iter()
+        .filter_map(external_backend_command)
+        .map(|(name, binary)| probe_backend(name, binary))
+        .collect()
+}
+
+fn probe_backend(name: &'static str, binary: &'static str) -> BackendProbe {
+    let path = find_executable_in_path(binary);
+    let Some(path) = path else {
+        return BackendProbe {
+            name,
+            binary,
+            available: false,
+            path: None,
+            help_ok: false,
+            help_status: "not-run".to_string(),
+        };
+    };
+
+    let (help_ok, help_status) = match Command::new(binary).arg("--help").output() {
+        Ok(output) if output.status.success() => (true, "ok".to_string()),
+        Ok(output) => (false, format!("exit-{}", output.status.code().unwrap_or(1))),
+        Err(error) => (false, format!("start-error: {error}")),
+    };
+
+    BackendProbe {
+        name,
+        binary,
+        available: true,
+        path: Some(path.display().to_string()),
+        help_ok,
+        help_status,
+    }
+}
+
+fn find_executable_in_path(binary: &str) -> Option<PathBuf> {
+    let path = env::var_os("PATH").unwrap_or_default();
+    for dir in env::split_paths(&path) {
+        let candidate = dir.join(binary);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn run_cli(cli: &Cli) -> Result<(), String> {
+    match cli {
+        Cli::Span(args) => run(args),
+        Cli::BackendDoctor { json } => {
+            print_backend_doctor(*json);
+            Ok(())
+        }
     }
 }
 
@@ -211,17 +382,28 @@ fn run(args: &Args) -> Result<(), String> {
                 continue;
             }
         }
+        let local_truncated = is_span_truncated(&span, args.max_lines);
         let span = cap_span(span, args.max_lines, lines.len());
-        let external = external_span(args.backend, &file, &span, args.max_lines)?;
+        let selection =
+            select_backend(args.backend, &file, &span, args.max_lines, local_truncated)?;
+
+        if args.explain {
+            eprintln!("backend: {}", selection.backend);
+            eprintln!("backend reason: {}", selection.reason);
+            eprintln!(
+                "fallback used: {}",
+                if selection.fallback_used { "yes" } else { "no" }
+            );
+            eprintln!(
+                "truncated: {}",
+                if selection.truncated { "yes" } else { "no" }
+            );
+        }
 
         if args.json {
-            if let Some(external) = external {
-                print_external_json(&file, line, &span, &external);
-            } else {
-                print_json(&file, line, &lines, &span);
-            }
-        } else if let Some(external) = external {
-            print_external_human(&file, &span, &external);
+            print_json(&file, line, &lines, &span, &selection);
+        } else if let Some(external) = &selection.external {
+            print_external_human(&file, &span, external);
         } else {
             print_human(&file, line, &lines, &span);
         }
@@ -378,19 +560,35 @@ fn find_span(file: &str, lines: &[&str], line: usize) -> Span {
     }
 }
 
-fn external_span(
+fn select_backend(
     backend: Backend,
     file: &str,
     span: &Span,
     max_lines: usize,
-) -> Result<Option<ExternalSpan>, String> {
+    local_truncated: bool,
+) -> Result<BackendSelection, String> {
     if backend == Backend::Heuristic {
-        return Ok(None);
+        return Ok(BackendSelection {
+            backend: "heuristic",
+            reason: "heuristic backend selected explicitly".to_string(),
+            fallback_used: false,
+            external: None,
+            truncated: local_truncated,
+        });
     }
 
     if !is_external_symbol(&span.symbol) {
         return match backend {
-            Backend::Auto | Backend::Heuristic => Ok(None),
+            Backend::Auto | Backend::Heuristic => Ok(BackendSelection {
+                backend: "heuristic",
+                reason: format!(
+                    "auto fell back to heuristic because no concrete symbol was inferred ({})",
+                    span.symbol
+                ),
+                fallback_used: true,
+                external: None,
+                truncated: local_truncated,
+            }),
             Backend::AstOutline | Backend::AstBro => Err(format!(
                 "backend {} requires a concrete symbol; got {}",
                 backend_name(backend),
@@ -400,19 +598,51 @@ fn external_span(
     }
 
     match backend {
-        Backend::Heuristic => Ok(None),
+        Backend::Heuristic => unreachable!("heuristic handled above"),
         Backend::Auto => {
-            for backend in [Backend::AstOutline, Backend::AstBro] {
+            for (index, backend) in [Backend::AstOutline, Backend::AstBro]
+                .into_iter()
+                .enumerate()
+            {
                 if let Ok(Some(output)) =
                     run_external_backend(backend, file, &span.symbol, max_lines)
                 {
-                    return Ok(Some(output));
+                    let selected = output.backend;
+                    let truncated = output.truncated;
+                    return Ok(BackendSelection {
+                        backend: selected,
+                        reason: format!("auto selected {selected} for symbol {}", span.symbol),
+                        fallback_used: index > 0,
+                        external: Some(output),
+                        truncated,
+                    });
                 }
             }
-            Ok(None)
+            Ok(BackendSelection {
+                backend: "heuristic",
+                reason: "auto fell back to heuristic because no external backend succeeded"
+                    .to_string(),
+                fallback_used: true,
+                external: None,
+                truncated: local_truncated,
+            })
         }
         Backend::AstOutline | Backend::AstBro => {
-            run_external_backend(backend, file, &span.symbol, max_lines)
+            run_external_backend(backend, file, &span.symbol, max_lines).map(|external| {
+                let external = external.expect("explicit external backend should return output");
+                let selected = external.backend;
+                let truncated = external.truncated;
+                BackendSelection {
+                    backend: selected,
+                    reason: format!(
+                        "explicit backend {selected} selected for symbol {}",
+                        span.symbol
+                    ),
+                    fallback_used: false,
+                    external: Some(external),
+                    truncated,
+                }
+            })
         }
     }
 }
@@ -459,16 +689,18 @@ fn run_external_backend(
         ));
     }
 
+    let (text, truncated) = cap_external_text(&String::from_utf8_lossy(&output.stdout), max_lines);
     Ok(Some(ExternalSpan {
         backend: name,
-        text: cap_external_text(&String::from_utf8_lossy(&output.stdout), max_lines),
+        text,
+        truncated,
     }))
 }
 
-fn cap_external_text(text: &str, max_lines: usize) -> String {
+fn cap_external_text(text: &str, max_lines: usize) -> (String, bool) {
     let mut lines = text.lines().collect::<Vec<_>>();
     if lines.len() <= max_lines {
-        return text.to_string();
+        return (text.to_string(), false);
     }
 
     lines.truncate(max_lines);
@@ -477,7 +709,7 @@ fn cap_external_text(text: &str, max_lines: usize) -> String {
     }
     let mut output = lines.join("\n");
     output.push('\n');
-    output
+    (output, true)
 }
 
 fn external_backend_command(backend: Backend) -> Option<(&'static str, &'static str)> {
@@ -718,6 +950,10 @@ fn indent(line: &str) -> usize {
         .count()
 }
 
+fn is_span_truncated(span: &Span, max_lines: usize) -> bool {
+    span.end >= span.start && span.end - span.start + 1 > max_lines
+}
+
 fn cap_span(mut span: Span, max_lines: usize, total_lines: usize) -> Span {
     if span.end < span.start {
         span.end = span.start;
@@ -753,10 +989,17 @@ fn print_external_human(file: &str, span: &Span, external: &ExternalSpan) {
     print!("{}", external.text);
 }
 
-fn print_json(file: &str, line: usize, lines: &[&str], span: &Span) {
-    let text = lines[span.start - 1..span.end].join("\n");
+fn print_json(file: &str, line: usize, lines: &[&str], span: &Span, selection: &BackendSelection) {
+    let text = selection.external.as_ref().map_or_else(
+        || lines[span.start - 1..span.end].join("\n"),
+        |external| external.text.trim_end().to_string(),
+    );
     println!(
-        "{{\"tool\":\"span\",\"backend\":\"heuristic\",\"file\":\"{}\",\"line\":{},\"range\":[{},{}],\"kind\":\"{}\",\"symbol\":\"{}\",\"text\":\"{}\"}}",
+        "{{\"tool\":\"span\",\"backend\":\"{}\",\"backend_reason\":\"{}\",\"fallback_used\":{},\"truncated\":{},\"file\":\"{}\",\"line\":{},\"range\":[{},{}],\"kind\":\"{}\",\"symbol\":\"{}\",\"text\":\"{}\"}}",
+        selection.backend,
+        json_escape(&selection.reason),
+        selection.fallback_used,
+        selection.truncated,
         json_escape(file),
         line,
         span.start,
@@ -767,18 +1010,11 @@ fn print_json(file: &str, line: usize, lines: &[&str], span: &Span) {
     );
 }
 
-fn print_external_json(file: &str, line: usize, span: &Span, external: &ExternalSpan) {
-    println!(
-        "{{\"tool\":\"span\",\"backend\":\"{}\",\"file\":\"{}\",\"line\":{},\"range\":[{},{}],\"kind\":\"{}\",\"symbol\":\"{}\",\"text\":\"{}\"}}",
-        external.backend,
-        json_escape(file),
-        line,
-        span.start,
-        span.end,
-        span.kind,
-        json_escape(&span.symbol),
-        json_escape(external.text.trim_end())
-    );
+fn json_optional_string(value: Option<&str>) -> String {
+    value.map_or_else(
+        || "null".to_string(),
+        |value| format!("\"{}\"", json_escape(value)),
+    )
 }
 
 fn json_escape(value: &str) -> String {
