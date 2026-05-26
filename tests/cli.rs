@@ -110,3 +110,28 @@ fn symbol_finds_named_span() {
 
     fs::remove_dir_all(dir).expect("remove temp dir");
 }
+
+#[test]
+fn kind_filter_accepts_matching_span_kind() {
+    let dir = temp_dir("span-kind");
+    let file = dir.join("sample.rs");
+    fs::write(&file, "fn alpha() {\n    println!(\"selected\");\n}\n").expect("write sample");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_span"))
+        .args([
+            "--kind",
+            "function",
+            "--contains",
+            "selected",
+            dir.to_str().expect("utf8 path"),
+        ])
+        .output()
+        .expect("run span");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("kind: function"), "{stdout}");
+    assert!(stdout.contains("symbol: alpha"), "{stdout}");
+
+    fs::remove_dir_all(dir).expect("remove temp dir");
+}

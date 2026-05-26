@@ -8,6 +8,7 @@ span -- extract syntax-bounded code context.
 span src/main.rs:42
 span --contains "unwrap()" src/
 span --symbol verify_proof_plan crates/
+span --kind function --contains "panic!" src/
 span --max-lines 40 --json src/main.rs:42
 ```
 

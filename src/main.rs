@@ -10,6 +10,7 @@ const CONTEXT_RADIUS: usize = 20;
 struct Args {
     target: Target,
     max_lines: usize,
+    kind: Option<String>,
     json: bool,
 }
 
@@ -33,9 +34,11 @@ fn main() {
         Ok(args) => args,
         Err(message) => {
             eprintln!("span: {message}");
-            eprintln!("usage: span [--max-lines N] [--json] FILE:LINE");
-            eprintln!("       span [--max-lines N] [--json] --contains PATTERN [PATH]");
-            eprintln!("       span [--max-lines N] [--json] --symbol NAME [PATH]");
+            eprintln!("usage: span [--max-lines N] [--kind KIND] [--json] FILE:LINE");
+            eprintln!(
+                "       span [--max-lines N] [--kind KIND] [--json] --contains PATTERN [PATH]"
+            );
+            eprintln!("       span [--max-lines N] [--kind KIND] [--json] --symbol NAME [PATH]");
             process::exit(2);
         }
     };
@@ -54,6 +57,7 @@ where
     I: IntoIterator<Item = String>,
 {
     let mut max_lines = DEFAULT_MAX_LINES;
+    let mut kind = None;
     let mut json = false;
     let mut contains = None;
     let mut symbol = None;
@@ -70,6 +74,12 @@ where
                     .parse()
                     .map_err(|_| "--max-lines requires a positive integer".to_string())?;
             }
+            "--kind" => {
+                kind = Some(
+                    iter.next()
+                        .ok_or_else(|| "--kind requires a value".to_string())?,
+                );
+            }
             "--contains" => {
                 contains = Some(
                     iter.next()
@@ -84,9 +94,11 @@ where
             }
             "--json" => json = true,
             "-h" | "--help" => {
-                println!("usage: span [--max-lines N] [--json] FILE:LINE");
-                println!("       span [--max-lines N] [--json] --contains PATTERN [PATH]");
-                println!("       span [--max-lines N] [--json] --symbol NAME [PATH]");
+                println!("usage: span [--max-lines N] [--kind KIND] [--json] FILE:LINE");
+                println!(
+                    "       span [--max-lines N] [--kind KIND] [--json] --contains PATTERN [PATH]"
+                );
+                println!("       span [--max-lines N] [--kind KIND] [--json] --symbol NAME [PATH]");
                 process::exit(0);
             }
             _ if (contains.is_some() || symbol.is_some()) && root.is_none() => {
@@ -120,6 +132,7 @@ where
     Ok(Args {
         target,
         max_lines,
+        kind,
         json,
     })
 }
@@ -141,6 +154,14 @@ fn run(args: &Args) -> Result<(), String> {
     }
 
     let span = find_span(&file, &lines, line);
+    if let Some(kind) = &args.kind {
+        if span.kind != kind {
+            return Err(format!(
+                "matched span kind is {}, expected {kind}",
+                span.kind
+            ));
+        }
+    }
     let span = cap_span(span, args.max_lines, lines.len());
 
     if args.json {
