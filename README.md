@@ -4,7 +4,7 @@
 
 ## Agent Value
 
-Use `span` to avoid reading whole source files when the agent only needs the relevant function, block, class, impl, Markdown fence, or fallback line window.
+Use `span` to avoid reading whole source files when the agent only needs the relevant function, Rust item, class, impl, Markdown fence, or fallback line window.
 
 ## Usage
 
@@ -12,6 +12,7 @@ Use `span` to avoid reading whole source files when the agent only needs the rel
 span src/main.rs:42
 span --contains "unwrap()" src/
 span --symbol verify_proof_plan crates/
+span --symbol FileInfo crates/
 span --kind function --contains "panic!" src/
 span --max-lines 40 --json src/main.rs:42
 ```

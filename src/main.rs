@@ -368,49 +368,102 @@ fn syntactic_start_span(lines: &[&str], line: usize) -> Option<Span> {
 }
 
 fn looks_like_symbol(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    trimmed.starts_with("fn ")
-        || trimmed.starts_with("pub fn ")
-        || trimmed.starts_with("pub(crate) fn ")
-        || trimmed.starts_with("impl ")
-        || trimmed.starts_with("class ")
-        || trimmed.starts_with("def ")
-        || trimmed.starts_with("func ")
-        || trimmed.starts_with("function ")
-        || trimmed.starts_with("export function ")
+    symbol_parts(line).is_some()
 }
 
 fn classify_symbol(line: &str) -> &'static str {
-    if line.starts_with("class ") {
-        "class"
-    } else if line.starts_with("impl ") {
-        "impl"
-    } else if line.starts_with("def ") || line.contains(" fn ") || line.starts_with("fn ") {
-        "function"
-    } else {
-        "block"
-    }
+    symbol_parts(line).map_or("block", |(kind, _)| kind)
 }
 
 fn symbol_name(line: &str) -> String {
-    let cleaned = line
-        .replace("pub(crate)", "")
-        .replace("pub", "")
-        .replace("export", "")
-        .replace("function", "")
-        .replace("fn", "")
-        .replace("def", "")
-        .replace("func", "")
-        .replace("class", "");
+    symbol_parts(line).map_or_else(|| "<unknown>".to_string(), |(_, name)| name)
+}
 
-    cleaned
-        .trim()
+fn symbol_parts(line: &str) -> Option<(&'static str, String)> {
+    let rest = strip_symbol_prefixes(line.trim_start());
+
+    for (keyword, kind) in [
+        ("fn ", "function"),
+        ("struct ", "struct"),
+        ("enum ", "enum"),
+        ("trait ", "trait"),
+        ("class ", "class"),
+        ("def ", "function"),
+        ("func ", "function"),
+        ("function ", "function"),
+    ] {
+        if let Some(name) = rest.strip_prefix(keyword) {
+            return Some((kind, first_symbol_token(name)));
+        }
+    }
+
+    if rest.starts_with("impl ") || rest.starts_with("impl<") {
+        return Some(("impl", impl_symbol_name(rest)));
+    }
+
+    None
+}
+
+fn strip_symbol_prefixes(mut text: &str) -> &str {
+    loop {
+        let stripped = text
+            .strip_prefix("pub(crate) ")
+            .or_else(|| text.strip_prefix("pub(super) "))
+            .or_else(|| text.strip_prefix("pub(self) "))
+            .or_else(|| text.strip_prefix("pub "))
+            .or_else(|| text.strip_prefix("export "))
+            .or_else(|| text.strip_prefix("async "))
+            .or_else(|| text.strip_prefix("const "))
+            .or_else(|| text.strip_prefix("unsafe "));
+
+        let Some(next) = stripped else {
+            return strip_extern_prefix(text);
+        };
+        text = next.trim_start();
+    }
+}
+
+fn strip_extern_prefix(text: &str) -> &str {
+    let Some(mut rest) = text.strip_prefix("extern ") else {
+        return text;
+    };
+
+    rest = rest.trim_start();
+    if let Some(stripped) = rest.strip_prefix('"') {
+        if let Some(end_quote) = stripped.find('"') {
+            return stripped[end_quote + 1..].trim_start();
+        }
+    }
+
+    rest
+}
+
+fn first_symbol_token(text: &str) -> String {
+    text.trim_start()
         .split(|character: char| {
-            character == '(' || character == '<' || character == ':' || character.is_whitespace()
+            character == '('
+                || character == '<'
+                || character == ':'
+                || character == '{'
+                || character == ';'
+                || character.is_whitespace()
         })
         .next()
+        .filter(|name| !name.is_empty())
         .unwrap_or("<unknown>")
         .to_string()
+}
+
+fn impl_symbol_name(text: &str) -> String {
+    let rest = text.strip_prefix("impl").unwrap_or(text).trim_start();
+
+    if let Some(generic_rest) = rest.strip_prefix('<') {
+        if let Some(end) = generic_rest.find('>') {
+            return first_symbol_token(&generic_rest[end + 1..]);
+        }
+    }
+
+    first_symbol_token(rest)
 }
 
 fn brace_span_end(lines: &[&str], start: usize) -> Option<usize> {
