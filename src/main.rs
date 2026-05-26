@@ -324,29 +324,32 @@ fn find_span(file: &str, lines: &[&str], line: usize) -> Span {
 }
 
 fn markdown_fence_span(lines: &[&str], line: usize) -> Option<Span> {
-    let mut start = None;
-    for index in (0..line).rev() {
-        if lines[index].trim_start().starts_with("```") {
-            start = Some(index + 1);
-            break;
-        }
-    }
+    let mut open_start = None;
 
-    let start = start?;
-    let mut end = None;
-    for (index, line_text) in lines.iter().enumerate().skip(line) {
+    for (index, line_text) in lines.iter().enumerate() {
+        let fence_line = index + 1;
         if line_text.trim_start().starts_with("```") {
-            end = Some(index + 1);
+            if let Some(start) = open_start {
+                if line >= start && line <= fence_line {
+                    return Some(Span {
+                        start,
+                        end: fence_line,
+                        kind: "markdown-fence",
+                        symbol: "```".to_string(),
+                    });
+                }
+                open_start = None;
+            } else {
+                open_start = Some(fence_line);
+            }
+        }
+
+        if fence_line > line && open_start.is_none() {
             break;
         }
     }
 
-    end.map(|end| Span {
-        start,
-        end,
-        kind: "markdown-fence",
-        symbol: "```".to_string(),
-    })
+    None
 }
 
 fn syntactic_start_span(lines: &[&str], line: usize) -> Option<Span> {

@@ -254,3 +254,59 @@ fn kind_filter_continues_past_non_matching_candidates() {
 
     fs::remove_dir_all(dir).expect("remove temp dir");
 }
+
+#[test]
+fn markdown_fence_contains_inner_line() {
+    let dir = temp_dir("span-markdown-fence");
+    let file = dir.join("sample.md");
+    fs::write(
+        &file,
+        "# Notes\n\n```sh\necho selected\n```\n\nplain text\n",
+    )
+    .expect("write markdown sample");
+
+    let target = format!("{}:4", file.display());
+    let output = Command::new(env!("CARGO_BIN_EXE_span"))
+        .arg(target)
+        .output()
+        .expect("run span");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("range: 3..5"), "{stdout}");
+    assert!(stdout.contains("kind: markdown-fence"), "{stdout}");
+    assert!(stdout.contains(">    4 | echo selected"), "{stdout}");
+
+    fs::remove_dir_all(dir).expect("remove temp dir");
+}
+
+#[test]
+fn markdown_text_between_fences_is_not_reported_as_fence() {
+    let dir = temp_dir("span-markdown-between-fences");
+    let file = dir.join("sample.md");
+    fs::write(
+        &file,
+        "```sh\necho first\n```\n\nplain text between fences\n\n```sh\necho second\n```\n",
+    )
+    .expect("write markdown sample");
+
+    let target = format!("{}:5", file.display());
+    let output = Command::new(env!("CARGO_BIN_EXE_span"))
+        .arg(target)
+        .output()
+        .expect("run span");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("kind: context"), "{stdout}");
+    assert!(
+        !stdout.contains("kind: markdown-fence"),
+        "plain text was incorrectly classified as a fence:\n{stdout}"
+    );
+    assert!(
+        stdout.contains(">    5 | plain text between fences"),
+        "{stdout}"
+    );
+
+    fs::remove_dir_all(dir).expect("remove temp dir");
+}
