@@ -138,39 +138,49 @@ where
 }
 
 fn run(args: &Args) -> Result<(), String> {
-    let (file, line): (String, usize) = match &args.target {
+    let candidates = match &args.target {
         Target::Position(target) => {
             let (file, line) = parse_target(target)?;
-            (file.to_string(), line)
+            vec![(file.to_string(), line)]
         }
         Target::Contains { pattern, root } => find_contains(root, pattern)?,
         Target::Symbol { symbol, root } => find_symbol(root, symbol)?,
     };
-    let text = fs::read_to_string(&file).map_err(|error| format!("{file}: {error}"))?;
-    let lines: Vec<&str> = text.lines().collect();
 
-    if line == 0 || line > lines.len() {
-        return Err(format!("{file}: line {line} is outside 1..{}", lines.len()));
+    let mut kind_mismatches = Vec::new();
+    for (file, line) in candidates {
+        let text = fs::read_to_string(&file).map_err(|error| format!("{file}: {error}"))?;
+        let lines: Vec<&str> = text.lines().collect();
+
+        if line == 0 || line > lines.len() {
+            return Err(format!("{file}: line {line} is outside 1..{}", lines.len()));
+        }
+
+        let span = find_span(&file, &lines, line);
+        if let Some(kind) = &args.kind {
+            if span.kind != kind {
+                kind_mismatches.push(span.kind);
+                continue;
+            }
+        }
+        let span = cap_span(span, args.max_lines, lines.len());
+
+        if args.json {
+            print_json(&file, line, &lines, &span);
+        } else {
+            print_human(&file, line, &lines, &span);
+        }
+
+        return Ok(());
     }
 
-    let span = find_span(&file, &lines, line);
     if let Some(kind) = &args.kind {
-        if span.kind != kind {
-            return Err(format!(
-                "matched span kind is {}, expected {kind}",
-                span.kind
-            ));
+        if !kind_mismatches.is_empty() {
+            return Err(format!("no matched span had expected kind {kind}"));
         }
     }
-    let span = cap_span(span, args.max_lines, lines.len());
 
-    if args.json {
-        print_json(&file, line, &lines, &span);
-    } else {
-        print_human(&file, line, &lines, &span);
-    }
-
-    Ok(())
+    Err("no matching span found".to_string())
 }
 
 fn parse_target(target: &str) -> Result<(&str, usize), String> {
@@ -183,22 +193,26 @@ fn parse_target(target: &str) -> Result<(&str, usize), String> {
     Ok((file, line))
 }
 
-fn find_contains(root: &Path, pattern: &str) -> Result<(String, usize), String> {
+fn find_contains(root: &Path, pattern: &str) -> Result<Vec<(String, usize)>, String> {
     let mut matches = Vec::new();
     collect_matches(root, pattern, &mut matches)?;
-    matches
-        .into_iter()
-        .next()
-        .ok_or_else(|| format!("pattern not found: {pattern}"))
+    matches.sort();
+    if matches.is_empty() {
+        Err(format!("pattern not found: {pattern}"))
+    } else {
+        Ok(matches)
+    }
 }
 
-fn find_symbol(root: &Path, symbol: &str) -> Result<(String, usize), String> {
+fn find_symbol(root: &Path, symbol: &str) -> Result<Vec<(String, usize)>, String> {
     let mut matches = Vec::new();
     collect_symbol_matches(root, symbol, &mut matches)?;
-    matches
-        .into_iter()
-        .next()
-        .ok_or_else(|| format!("symbol not found: {symbol}"))
+    matches.sort();
+    if matches.is_empty() {
+        Err(format!("symbol not found: {symbol}"))
+    } else {
+        Ok(matches)
+    }
 }
 
 fn collect_symbol_matches(
@@ -207,18 +221,11 @@ fn collect_symbol_matches(
     matches: &mut Vec<(String, usize)>,
 ) -> Result<(), String> {
     if path.is_dir() {
-        let entries = fs::read_dir(path).map_err(|error| format!("{}: {error}", path.display()))?;
-        for entry in entries {
-            let entry = entry.map_err(|error| error.to_string())?;
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if matches!(name.as_ref(), ".git" | "target" | "node_modules") {
+        for entry in sorted_entries(path)? {
+            if is_skipped_entry(&entry) {
                 continue;
             }
-            collect_symbol_matches(&entry.path(), symbol, matches)?;
-            if !matches.is_empty() {
-                break;
-            }
+            collect_symbol_matches(&entry, symbol, matches)?;
         }
         return Ok(());
     }
@@ -234,7 +241,6 @@ fn collect_symbol_matches(
     for (index, line) in text.lines().enumerate() {
         if looks_like_symbol(line) && symbol_name(line) == symbol {
             matches.push((path.to_string_lossy().to_string(), index + 1));
-            break;
         }
     }
 
@@ -247,18 +253,11 @@ fn collect_matches(
     matches: &mut Vec<(String, usize)>,
 ) -> Result<(), String> {
     if path.is_dir() {
-        let entries = fs::read_dir(path).map_err(|error| format!("{}: {error}", path.display()))?;
-        for entry in entries {
-            let entry = entry.map_err(|error| error.to_string())?;
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if matches!(name.as_ref(), ".git" | "target" | "node_modules") {
+        for entry in sorted_entries(path)? {
+            if is_skipped_entry(&entry) {
                 continue;
             }
-            collect_matches(&entry.path(), pattern, matches)?;
-            if !matches.is_empty() {
-                break;
-            }
+            collect_matches(&entry, pattern, matches)?;
         }
         return Ok(());
     }
@@ -274,11 +273,29 @@ fn collect_matches(
     for (index, line) in text.lines().enumerate() {
         if line.contains(pattern) {
             matches.push((path.to_string_lossy().to_string(), index + 1));
-            break;
         }
     }
 
     Ok(())
+}
+
+fn sorted_entries(path: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut entries = fs::read_dir(path)
+        .map_err(|error| format!("{}: {error}", path.display()))?
+        .map(|entry| {
+            entry
+                .map(|entry| entry.path())
+                .map_err(|error| error.to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    entries.sort();
+    Ok(entries)
+}
+
+fn is_skipped_entry(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| matches!(name, ".git" | "target" | "node_modules"))
 }
 
 fn find_span(file: &str, lines: &[&str], line: usize) -> Span {

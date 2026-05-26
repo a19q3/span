@@ -51,5 +51,5 @@ See [docs/json.md](docs/json.md).
 - v0.1 is heuristic-first with a safe line-window fallback.
 - It is not a full parser.
 - Complex Rust macros, nested impls, and unusual formatting may produce approximate spans.
-- `--contains` and `--symbol` return the first match.
-
+- Recursive `--contains` and `--symbol` searches are deterministic by path order.
+- `--kind` filters candidates before returning a span.

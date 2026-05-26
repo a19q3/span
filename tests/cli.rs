@@ -135,3 +135,32 @@ fn kind_filter_accepts_matching_span_kind() {
 
     fs::remove_dir_all(dir).expect("remove temp dir");
 }
+
+#[test]
+fn kind_filter_continues_past_non_matching_candidates() {
+    let dir = temp_dir("span-kind-search");
+    fs::write(dir.join("a.txt"), "selected outside code\n").expect("write text sample");
+    fs::write(
+        dir.join("b.rs"),
+        "fn beta() {\n    println!(\"selected\");\n}\n",
+    )
+    .expect("write rust sample");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_span"))
+        .args([
+            "--kind",
+            "function",
+            "--contains",
+            "selected",
+            dir.to_str().expect("utf8 path"),
+        ])
+        .output()
+        .expect("run span");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("kind: function"), "{stdout}");
+    assert!(stdout.contains("symbol: beta"), "{stdout}");
+
+    fs::remove_dir_all(dir).expect("remove temp dir");
+}
