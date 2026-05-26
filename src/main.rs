@@ -17,6 +17,7 @@ struct Args {
 enum Target {
     Position(String),
     Contains { pattern: String, root: PathBuf },
+    Symbol { symbol: String, root: PathBuf },
 }
 
 #[derive(Debug)]
@@ -34,6 +35,7 @@ fn main() {
             eprintln!("span: {message}");
             eprintln!("usage: span [--max-lines N] [--json] FILE:LINE");
             eprintln!("       span [--max-lines N] [--json] --contains PATTERN [PATH]");
+            eprintln!("       span [--max-lines N] [--json] --symbol NAME [PATH]");
             process::exit(2);
         }
     };
@@ -54,6 +56,7 @@ where
     let mut max_lines = DEFAULT_MAX_LINES;
     let mut json = false;
     let mut contains = None;
+    let mut symbol = None;
     let mut position = None;
     let mut root = None;
     let mut iter = input.into_iter();
@@ -73,21 +76,41 @@ where
                         .ok_or_else(|| "--contains requires a pattern".to_string())?,
                 );
             }
+            "--symbol" => {
+                symbol = Some(
+                    iter.next()
+                        .ok_or_else(|| "--symbol requires a name".to_string())?,
+                );
+            }
             "--json" => json = true,
             "-h" | "--help" => {
                 println!("usage: span [--max-lines N] [--json] FILE:LINE");
                 println!("       span [--max-lines N] [--json] --contains PATTERN [PATH]");
+                println!("       span [--max-lines N] [--json] --symbol NAME [PATH]");
                 process::exit(0);
             }
-            _ if contains.is_some() && root.is_none() => root = Some(PathBuf::from(arg)),
-            _ if contains.is_none() && position.is_none() => position = Some(arg),
+            _ if (contains.is_some() || symbol.is_some()) && root.is_none() => {
+                root = Some(PathBuf::from(arg));
+            }
+            _ if contains.is_none() && symbol.is_none() && position.is_none() => {
+                position = Some(arg);
+            }
             _ => return Err(format!("unexpected argument: {arg}")),
         }
+    }
+
+    if contains.is_some() && symbol.is_some() {
+        return Err("--contains and --symbol cannot be used together".to_string());
     }
 
     let target = if let Some(pattern) = contains {
         Target::Contains {
             pattern,
+            root: root.unwrap_or_else(|| PathBuf::from(".")),
+        }
+    } else if let Some(symbol) = symbol {
+        Target::Symbol {
+            symbol,
             root: root.unwrap_or_else(|| PathBuf::from(".")),
         }
     } else {
@@ -108,6 +131,7 @@ fn run(args: &Args) -> Result<(), String> {
             (file.to_string(), line)
         }
         Target::Contains { pattern, root } => find_contains(root, pattern)?,
+        Target::Symbol { symbol, root } => find_symbol(root, symbol)?,
     };
     let text = fs::read_to_string(&file).map_err(|error| format!("{file}: {error}"))?;
     let lines: Vec<&str> = text.lines().collect();
@@ -145,6 +169,55 @@ fn find_contains(root: &Path, pattern: &str) -> Result<(String, usize), String> 
         .into_iter()
         .next()
         .ok_or_else(|| format!("pattern not found: {pattern}"))
+}
+
+fn find_symbol(root: &Path, symbol: &str) -> Result<(String, usize), String> {
+    let mut matches = Vec::new();
+    collect_symbol_matches(root, symbol, &mut matches)?;
+    matches
+        .into_iter()
+        .next()
+        .ok_or_else(|| format!("symbol not found: {symbol}"))
+}
+
+fn collect_symbol_matches(
+    path: &Path,
+    symbol: &str,
+    matches: &mut Vec<(String, usize)>,
+) -> Result<(), String> {
+    if path.is_dir() {
+        let entries = fs::read_dir(path).map_err(|error| format!("{}: {error}", path.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| error.to_string())?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if matches!(name.as_ref(), ".git" | "target" | "node_modules") {
+                continue;
+            }
+            collect_symbol_matches(&entry.path(), symbol, matches)?;
+            if !matches.is_empty() {
+                break;
+            }
+        }
+        return Ok(());
+    }
+
+    if !path.is_file() {
+        return Ok(());
+    }
+
+    let Ok(text) = fs::read_to_string(path) else {
+        return Ok(());
+    };
+
+    for (index, line) in text.lines().enumerate() {
+        if looks_like_symbol(line) && symbol_name(line) == symbol {
+            matches.push((path.to_string_lossy().to_string(), index + 1));
+            break;
+        }
+    }
+
+    Ok(())
 }
 
 fn collect_matches(

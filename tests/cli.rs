@@ -86,3 +86,27 @@ fn contains_finds_first_matching_span() {
 
     fs::remove_dir_all(dir).expect("remove temp dir");
 }
+
+#[test]
+fn symbol_finds_named_span() {
+    let dir = temp_dir("span-symbol");
+    let file = dir.join("sample.rs");
+    fs::write(
+        &file,
+        "fn alpha() {}\n\npub fn beta() {\n    println!(\"selected\");\n}\n",
+    )
+    .expect("write sample");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_span"))
+        .args(["--symbol", "beta", dir.to_str().expect("utf8 path")])
+        .output()
+        .expect("run span");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("range: 3..5"), "{stdout}");
+    assert!(stdout.contains("symbol: beta"), "{stdout}");
+    assert!(stdout.contains(">    3 | pub fn beta() {"), "{stdout}");
+
+    fs::remove_dir_all(dir).expect("remove temp dir");
+}
